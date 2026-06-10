@@ -15,25 +15,57 @@ np.random.seed(42)
 torch.manual_seed(42)
 
 class WESAD(Dataset):
-    def __init__(self, fnames):  
+    def __init__(self, fnames, 
+                 sample_root="data/samples",
+                 covs_path='data/RegularizedData4Hz.pkl'):  
         self.fnames = fnames
-        with open("/work/pi_mfiterau_umass_edu/Iman/datasets/WESAD/DataCalmNet/RegularizedData4Hz.pkl", "rb") as f:
+        self.sample_root = sample_root
+
+        with open(covs_path, "rb") as f:
             self.covs = pickle.load(f)
 
     def __len__(self):
         return len(self.fnames)
 
     def __getitem__(self, idx):
-        with open(os.path.join("data/samples", self.fnames[idx]), "rb") as f:
+        # load sample data
+        with open(os.path.join(self.sample_root, self.fnames[idx]), "rb") as f:
             sample = pickle.load(f)
         sub_id = self.fnames[idx].split("_")[0]
-        try:
-            with open("data/portraits/{}".format(sub_id), 'rb') as f:
-                portrait = pickle.load(f)
-        except:
-            print(sub_id, "portrait not found.")
-            with open("data/portraits/mean", 'rb') as f:
-                portrait = pickle.load(f)
+
+
+
+        '''
+        Deprecated: Semantic portrait embeddings
+        
+        This block previously loaded subject-level "semantic portraits"
+        derived from demographic text. It is retained here for reference
+        in case this approach is revisited in future research.
+        
+        Original procedure:
+        1. Encode each subject's demographic text using a pretrained
+           language model (e.g., ClinicalBERT or BioBART).
+        2. Obtain a subject-level embedding by applying global mean
+           pooling over token-level representations.
+        3. Ensure the final representation is a single fixed-length
+           vector, compatible with other covariates.
+        4. (Optional) Apply PCA on the training embeddings and retain
+           enough components to explain 95% or 99% of the variance.
+        
+        The code below attempted to load a precomputed portrait for each
+        subject, falling back to the population mean embedding if unavailable.
+        '''
+        # try:
+        #     with open("data/portraits/{}".format(sub_id), 'rb') as f:
+        #         portrait = pickle.load(f)
+        # except:
+        #     print(sub_id, "portrait not found.")
+        #     with open("data/portraits/mean", 'rb') as f:
+        #         portrait = pickle.load(f)
+
+
+
+        # Extract covariates
         cov = list()
         cov.append(int(self.covs["S{}".format(sub_id)]["Covs"]["Age"]) / 100)
         cov.append(int(self.covs["S{}".format(sub_id)]["Covs"]["Height"]) / 200)
@@ -45,11 +77,12 @@ class WESAD(Dataset):
         cov.append(0 if self.covs["S{}".format(sub_id)]["Covs"]["Smoker"] == "No" else 0)
         cov.append(0 if self.covs["S{}".format(sub_id)]["Covs"]["ill"] == "No" else 0)
 
+        # packing
         return {
             'signals': torch.tensor(sample["signal"]).float().to(DEVICE),
             'labels': torch.tensor(sample["label"]).long().to(DEVICE),
             'subjects': sample["subject"],
-            "portrait": torch.tensor(portrait).float().to(DEVICE),
+            # "portrait": torch.tensor(portrait).float().to(DEVICE),
             "covs": torch.tensor(cov).float().to(DEVICE)
         }
 
@@ -96,7 +129,12 @@ def eval_res(y_preds, y_trues, labels=[0, 1, 2]):
         "acc": np.mean(pred_class == y_trues)
     }
 
-def eval_one_fold(i, trail_name="baseline", split_name="data/splits_5fold"):
+def eval_one_fold(i, trail_name="baseline", split_name="data/splits_5fold",
+                  sample_root="data/samples",
+                  covs_path='data/RegularizedData4Hz.pkl',
+                  result_output_root='data/exp_res/baseline'):
+    os.makedirs(os.path.join(result_output_root, trail_name), exist_ok=True)
+
     # get splits
     with open(split_name, "rb") as f:
         splits_f = pickle.load(f)
@@ -105,8 +143,8 @@ def eval_one_fold(i, trail_name="baseline", split_name="data/splits_5fold"):
 
     split = splits[i]
     # load data
-    train_dataset = WESAD(split["train_fnames"])
-    eval_dataset = WESAD(split["test_fnames"])
+    train_dataset = WESAD(split["train_fnames"], sample_root=sample_root, covs_path=covs_path)
+    eval_dataset = WESAD(split["test_fnames"], sample_root=sample_root, covs_path=covs_path)
 
     # construct model
     model = load_model(trail_name, subjects)
@@ -126,7 +164,7 @@ def eval_one_fold(i, trail_name="baseline", split_name="data/splits_5fold"):
     )
 
     # plot the training losses
-    fig_name = "data/exp_res/{}_{}.png".format(trail_name, i)
+    fig_name = os.path.join(result_output_root, trail_name, "{}_{}.png".format(trail_name, i))
     plt.clf()
     plt.plot(record["train_i"], record["train_losses"], label="Train")
     plt.plot(record["eval_i"], record["eval_losses"], label="Eval")
@@ -138,7 +176,7 @@ def eval_one_fold(i, trail_name="baseline", split_name="data/splits_5fold"):
     for s in curr_scores:
         print(s, curr_scores[s])
     
-    record_name = "data/exp_res/{}_record_{}".format(trail_name, i)
+    record_name = os.path.join(result_output_root, trail_name, "{}_record_{}".format(trail_name, i))
     with open(record_name, "wb") as f:
         records = {
             "y_preds": record["last_pred"]["y_preds"],
@@ -149,18 +187,31 @@ def eval_one_fold(i, trail_name="baseline", split_name="data/splits_5fold"):
     return fig_name, record_name
 
 if __name__ == "__main__":
+    # NOTE: example running command:
+    # python3 -m main baseline cv
+
+    # command line arguments
     trail_name = sys.argv[1]
     split_scheme = sys.argv[2]
 
-    # _, _ = eval_one_fold(2, trail_name=trail_name, split_name="data/time_split")
 
-    num_fold = 15 if split_scheme == 'loocv' else 3
+
+    # config
+    sample_root = "data/samples"
+    covs_path = 'data/RegularizedData4Hz.pkl'
+    result_output_root = 'data/exp_res'
+    
+    num_fold = 15 if split_scheme == 'loocv' else 5
     portion = 0.2
     print("Portion:", portion)
-    for i in range(num_fold):
-        split_name = "data/splits_subjects_loocv_{}".format(portion) if split_scheme == 'loocv' else "data/splits_3fold"
 
-        # _, _ = eval_one_fold(i, trail_name=trail_name, split_name="data/splits_{}fold".format(num_fold))
+
+
+    # main workflow for cross validation
+    for i in range(num_fold):
+        split_name = "data/splits_subjects_loocv_{}".format(portion) if split_scheme == 'loocv' else "data/splits_5fold"
+
         # _, _ = eval_one_fold(i, trail_name=trail_name, split_name="data/time_split")
-        _, _ = eval_one_fold(i, trail_name=trail_name, split_name=split_name)
-        # _, _ = eval_one_fold(i, trail_name=trail_name, split_name="data/splits_subjects_5fold")
+        _, _ = eval_one_fold(i, trail_name=trail_name, split_name=split_name,
+                             sample_root=sample_root, covs_path=covs_path,
+                             result_output_root=result_output_root)
